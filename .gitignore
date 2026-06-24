@@ -1,0 +1,30 @@
+.vs/*
+research/*
+bin/*
+build/
+*.exe
+*.pdb
+*.obj
+*.ilk
+*.sln
+*.bak
+*.txt
+*.bin
+*.3dsx
+*.elf
+
+# ROM dumps — must not be distributed
+*.rom
+pwflash.*
+pweep.*
+rom.bin
+eeprom.bin
+
+# Reference material (not our code)
+palmos-app/
+
+# Log and dump files from runtime
+pokestride.log
+tx_*.bin
+rx_*.bin
+lastsave.txt
