@@ -11,6 +11,8 @@ meant to be used together.
 > It's a hobby project and it runs well, but a few things are still partial — see
 > [What works](#what-works).
 
+<p align="center"><img src="img/screenshot.png" width="320" alt="PokeStride running on a Nintendo 3DS"></p>
+
 ## Get it
 
 1. Download `pokeStride.3dsx` from the [**Releases**](https://github.com/edgarburgues/pokestride/releases).
