@@ -3217,6 +3217,10 @@ int runNextInstruction(uint64_t* cycleCount){
 			static uint8_t  irBurst[256];   /* reensamblado del paquete IR */
 			static size_t   irBurstLen = 0;
 			if (--irPollCountdown == 0) {
+				/* Drenar el eco AUNQUE estemos transmitiendo: el FIFO son
+				 * 64 B y un chunk genera 136 B de eco -> desbordaria y se
+				 * perderian tambien los bytes que el peer manda despues. */
+				ir_drain_tx_echo();
 				/* Fixed 4096-cycle poll (~1.1ms). An adaptive tighter poll
 				 * during RE was tried and regressed the handshake (more I2C
 				 * per frame added jitter exactly when timing matters); the

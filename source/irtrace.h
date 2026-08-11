@@ -24,4 +24,8 @@ struct IrTraceEvent {
 
 void irTraceInit(void);
 void irTracePush(uint8_t type, uint8_t data, uint16_t pc, uint32_t cycle);
-void irTraceFlush(void);
+
+/* Vacía el ring a los logs y devuelve cuántos eventos había. Un 0 significa
+ * "este frame no hubo actividad IR", que es el único momento seguro para
+ * bajar el log a la SD (ver jsonlog.c). */
+uint32_t irTraceFlush(void);

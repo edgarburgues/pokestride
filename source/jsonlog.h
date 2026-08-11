@@ -50,7 +50,10 @@ void jsonlog_ev(const char *kind, const char *extra_fmt, ...)
 void jsonlog_ev_bytes(const char *kind, const uint8_t *buf, uint32_t len,
                       uint16_t pc);
 
-/* Force buffered events to disk.  Call once per frame from the main
- * loop so the trace stays fresh without SD-write stalls inside the
- * hot IR path. */
+/* Baja a la SD lo acumulado en RAM desde la última llamada.
+ *
+ * ⚠ Llamar SOLO desde un frame sin actividad IR. Un write a SD congela el
+ * emulador cientos de ms mientras el SC16IS750 sigue vaciando su FIFO, lo que
+ * parte los paquetes a media trama. El main loop lo condiciona a que
+ * irTraceFlush() haya devuelto 0 eventos. Ver jsonlog.c. */
 void jsonlog_flush(void);

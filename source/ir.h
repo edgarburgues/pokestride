@@ -57,6 +57,9 @@ void ir_recv_stop(void);
  * Used by the pacing loop to compensate for I2C transfer time.          */
 uint64_t ir_get_blocked_ticks(void);
 
+/* true si hay una ráfaga TX de la ROM a medias (ver ir.c). */
+bool ir_tx_busy(void);
+
 /* Flush deferred IR event counters to the log file.
  * Must be called from the main loop (safe stack depth for fprintf).     */
 void ir_log_events(void);
@@ -68,3 +71,6 @@ void ir_get_rx_stats(uint32_t *raw, uint32_t *stripped, uint32_t *owed);
 
 /* true si el ultimo poll vio el FIFO vacio en RX (= silencio real). */
 bool ir_rx_air_silent(void);
+
+/* Drena el FIFO durante un TX para que el eco no lo desborde. */
+void ir_drain_tx_echo(void);

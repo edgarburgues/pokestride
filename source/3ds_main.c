@@ -149,9 +149,11 @@ int main(int argc, char *argv[])
     chdir("sdmc:/3ds/pokeStride");
 
     logOpen();
-    /* DEBUG BUILD: capture the IR exchange for pairing diagnosis.
-     * Writes sdmc:/3ds/pokeStride/ir_events.jsonl (block-buffered, flushed
-     * per frame — see jsonlog.c for why this doesn't break IR timing). */
+    /* DEBUG BUILD: captura el intercambio IR para diagnosticar el pairing.
+     * Escribe sdmc:/3ds/pokeStride/ir_events.jsonl, truncándolo en cada
+     * arranque (fopen "w") para que el log sea siempre el del run actual.
+     * Los eventos se acumulan en RAM y solo bajan a SD en frames sin IR;
+     * ver jsonlog.c para por qué escribir durante la sesión la rompía. */
     jsonlog_init("ir_events.jsonl");
     LOG("=== PokeStride started ===");
     LOG("SYSTICK_HZ=%llu  H8_HZ=%llu  TICKS_PER_CYCLE_INT=%llu  REM=%llu",
@@ -301,12 +303,29 @@ int main(int argc, char *argv[])
         frameCycles  = 0;
         cycleCount   = 0;
 
-        /* ---- RTC + Render ------------------------------------------------ */
+        /* ---- RTC + Render ------------------------------------------------ *
+         *
+         * No renderizar si la ROM está a media ráfaga de TX. El frame de GPU
+         * usa C3D_FRAME_SYNCDRAW y bloquea ~1 vblank; con el emulador parado
+         * ahí, el SC16IS750 vacía su FIFO y el paquete sale PARTIDO. Medido
+         * en el aire: 131 B + 26 ms de silencio + 5 B, que el peer lee como
+         * dos tramas rotas. Un walker real es aún menos tolerante: enmarca
+         * con 122 us de silencio.
+         *
+         * Saltarse el frame es barato: el LCD del walker va a 4 FPS y una
+         * sesión de emparejamiento dura segundos. El tope de 8 frames evita
+         * que la UI se congele si irInTxMode se quedara colgado. */
+        static uint32_t skippedRenders = 0;
+        bool skipRender = ir_tx_busy() && skippedRenders < 8;
+        skippedRenders = skipRender ? skippedRenders + 1 : 0;
+
         u64 renderStart = svcGetSystemTick();
 
-        quarterRTCInterrupt();
-        fillVideoBuffer(videoBuffer);
-        lcd_tex_upload(videoBuffer);  /* CPU 96x64 -> tiled GPU texture */
+        quarterRTCInterrupt();   /* el RTC nunca se salta: es el reloj del walker */
+        if (!skipRender) {
+            fillVideoBuffer(videoBuffer);
+            lcd_tex_upload(videoBuffer);  /* CPU 96x64 -> tiled GPU texture */
+        }
 
         /* ---- Audio ------------------------------------------------------- *
          * audioUpdate() is a no-op while audio is disabled in audio.c. The
@@ -498,16 +517,26 @@ int main(int argc, char *argv[])
                            (unsigned long)owed);
             }
         }
-        irTraceFlush();
+        uint32_t irEventsThisFrame = irTraceFlush();
 
-        /* Commit buffered log lines to SD once per frame. The hot IR path
-         * uses block-buffered FILEs so fprintf doesn't stall on SD writes;
-         * this is where the buffers actually hit disk. */
-        if (logFile) fflush(logFile);
-        jsonlog_flush();
+        /* Bajar el log a la SD SOLO en frames sin actividad IR.
+         *
+         * Un write a SD congela el emulador cientos de ms (medido: frames con
+         * tráfico IR tardaban 640-720 ms en vez de 250). El SC16IS750 no se
+         * congela con él: sigue vaciando su FIFO y se queda mudo a mitad de
+         * paquete, así que el peer recibía tramas partidas y truncadas. Es
+         * decir, instrumentar la sesión era lo que la rompía. Los eventos se
+         * acumulan en RAM (ver jsonlog.c) y aterrizan en disco en cuanto el
+         * enlace queda en silencio — típicamente el frame siguiente al final
+         * de la sesión, así que el post-mortem sigue completo. */
+        if (irEventsThisFrame == 0) {
+            if (logFile) fflush(logFile);
+            jsonlog_flush();
+        }
 
-        /* ---- GPU frame: walker LCD on top, companion UI on bottom -------*/
-        {
+        /* ---- GPU frame: walker LCD on top, companion UI on bottom -------*
+         * Se salta entero si hay una ráfaga TX en vuelo (ver arriba). */
+        if (!skipRender) {
             uint32_t today_steps    = getWalkerSteps();         /* RAM 0xF79C */
             uint32_t lifetime_steps = getWalkerLifetimeSteps(); /* RAM 0xF780 */
             uint16_t watts          = getWalkerWatts();

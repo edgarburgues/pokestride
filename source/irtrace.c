@@ -22,10 +22,11 @@ void irTracePush(uint8_t type, uint8_t data, uint16_t pc, uint32_t cycle) {
     traceHead++;
 }
 
-void irTraceFlush(void) {
+uint32_t irTraceFlush(void) {
     /* Drain the ring to BOTH the text log AND the structured JSON log.
      * Either sink may be NULL-disabled independently. */
     uint32_t head = traceHead;
+    uint32_t drained = head - traceTail;
     while (traceTail != head) {
         uint32_t idx = traceTail & (IR_TRACE_SIZE - 1);
         struct IrTraceEvent *e = &traceRing[idx];
@@ -92,4 +93,5 @@ void irTraceFlush(void) {
 
         traceTail++;
     }
+    return drained;
 }

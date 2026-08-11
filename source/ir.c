@@ -332,6 +332,10 @@ static bool irInTxMode = false;  /* true = TX burst in progress */
  * que significa silencio en el aire (= frontera de paquete). Devolver 0 por
  * estar en TX, o por haber descartado solo eco, NO es silencio. */
 static bool irAirSilent = false;
+/* Bytes REALES del peer rescatados mientras drenabamos el eco durante un TX.
+ * Se sirven en el siguiente poll: tirarlos se comia los FA/F8 del peer. */
+static uint8_t irPending[192];
+static size_t  irPendingLen = 0;
 static u32  irIdlePolls   = 0;   /* polls consecutivos con el FIFO vacio en RX */
 static u32  irEchoResyncs = 0;   /* veces que se reseteo echoOwed por silencio */
 
@@ -443,6 +447,12 @@ void ir_tx_flush_to_rx(void) {
     irInTxMode = false;
 }
 
+/* true mientras la ROM está a media ráfaga de TX: se activa con el primer byte
+ * y se apaga en ir_tx_flush_to_rx (320 ciclos sin escritura a TDR3 = fin de
+ * paquete). El main loop lo usa para no meter un frame de GPU en medio de un
+ * paquete, que abriría un hueco de ~26 ms en el aire. */
+bool ir_tx_busy(void) { return irInTxMode; }
+
 void ir_tx_end(void) {
     u64 t0 = svcGetSystemTick();
     if (irInTxMode) {
@@ -494,7 +504,33 @@ void ir_rx_flush(void) {
     irBlockedTicks += svcGetSystemTick() - t0;
 }
 
+/* Drena el FIFO DURANTE el TX para que no desborde (64 B de FIFO frente a los
+ * 136 B de eco que genera un chunk). Descuenta el eco pendiente y guarda el
+ * resto, que son bytes reales del peer. Llamar en cada tick de poll. */
+void ir_drain_tx_echo(void) {
+    if (!irInTxMode) return;
+    uint8_t lvl = I2C_read(REG_RXLVL);
+    if (lvl < 32) return;                 /* margen antes de llenar los 64 */
+    uint8_t scratch[64];
+    if (lvl > sizeof(scratch)) lvl = sizeof(scratch);
+    I2C_read_array(REG_FIFO, scratch, lvl);
+    irRawRxTotal += lvl;
+    for (size_t i = 0; i < lvl; i++) {
+        if (echoOwed > 0) { echoOwed--; irEchoStripTotal++; continue; }
+        if (irPendingLen < sizeof(irPending)) irPending[irPendingLen++] = scratch[i];
+    }
+}
+
 size_t ir_recv_poll(uint8_t *buf, size_t maxlen) {
+    if (irPendingLen > 0) {               /* rescatado durante el TX: va primero */
+        size_t n = irPendingLen < maxlen ? irPendingLen : maxlen;
+        memcpy(buf, irPending, n);
+        memmove(irPending, irPending + n, irPendingLen - n);
+        irPendingLen -= n;
+        irAirSilent = false;
+        return n;
+    }
+
     if (irInTxMode) { irAirSilent = false; return 0; }  /* TX: no es silencio */
 
     uint8_t rxlvl = I2C_read(REG_RXLVL);
