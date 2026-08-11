@@ -65,3 +65,6 @@ void ir_log_events(void);
  * FIFO this period, how many were stripped as our own echo, and the current
  * outstanding echo debt. Reading resets the two totals. */
 void ir_get_rx_stats(uint32_t *raw, uint32_t *stripped, uint32_t *owed);
+
+/* true si el ultimo poll vio el FIFO vacio en RX (= silencio real). */
+bool ir_rx_air_silent(void);

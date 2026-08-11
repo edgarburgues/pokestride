@@ -328,6 +328,12 @@ static u32 irStreamTxBytes = 0;
 static bool irTxActive = false;
 static bool irRxActive = false;
 static bool irInTxMode = false;  /* true = TX burst in progress */
+/* true SOLO si el ultimo poll vio el FIFO vacio estando en RX: es el unico caso
+ * que significa silencio en el aire (= frontera de paquete). Devolver 0 por
+ * estar en TX, o por haber descartado solo eco, NO es silencio. */
+static bool irAirSilent = false;
+static u32  irIdlePolls   = 0;   /* polls consecutivos con el FIFO vacio en RX */
+static u32  irEchoResyncs = 0;   /* veces que se reseteo echoOwed por silencio */
 
 /* ---- Echo cancellation ---------------------------------------------------
  * This SC16IS750 loops every transmitted byte back into its own RX FIFO
@@ -489,10 +495,23 @@ void ir_rx_flush(void) {
 }
 
 size_t ir_recv_poll(uint8_t *buf, size_t maxlen) {
-    if (irInTxMode) return 0;  /* gate during TX burst — see header comment */
+    if (irInTxMode) { irAirSilent = false; return 0; }  /* TX: no es silencio */
 
     uint8_t rxlvl = I2C_read(REG_RXLVL);
-    if (rxlvl == 0) return 0;
+    if (rxlvl == 0) {
+        irAirSilent = true;                 /* FIFO vacio en RX = silencio real */
+        /* El eco es OPTICO: vuelve dentro del propio burst. Si llevamos 2 polls
+         * (~2.2 ms) con el FIFO vacio y sin transmitir, no queda eco en vuelo,
+         * asi que un echoOwed residual es un DESAJUSTE (medido en HW:
+         * ir_rx_stats owed=40 al final de la sesion). Dejarlo puesto haria que
+         * los siguientes 40 bytes REALES del peer se descartasen como eco y se
+         * perderia su paquete. Reset acotado al silencio: nunca a mitad de
+         * burst, asi que no rompe el strip legitimo. */
+        if (++irIdlePolls >= 2u && echoOwed) { echoOwed = 0; irEchoResyncs++; }
+        return 0;
+    }
+    irIdlePolls = 0;
+    irAirSilent = false;                                 /* hubo actividad */
     if (rxlvl > maxlen) rxlvl = (uint8_t)maxlen;
     I2C_read_array(REG_FIFO, buf, rxlvl);
     irRawRxTotal += rxlvl;
@@ -563,3 +582,10 @@ void ir_log_events(void) {
         irRxHeadLen = 0;
     }
 }
+
+
+/* Ver irAirSilent: true solo tras un poll que encontro el FIFO vacio en RX.
+ * walker.c lo usa para saber que el aire callo (= fin de paquete) en vez de
+ * fiarse de que ir_recv_poll devolviera 0 (que tambien pasa en TX o si todo
+ * lo leido era eco). */
+bool ir_rx_air_silent(void) { return irAirSilent; }

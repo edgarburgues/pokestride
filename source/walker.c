@@ -3214,6 +3214,8 @@ int runNextInstruction(uint64_t* cycleCount){
 #ifdef __3DS__
 		{
 			static uint32_t irPollCountdown = 4096;
+			static uint8_t  irBurst[256];   /* reensamblado del paquete IR */
+			static size_t   irBurstLen = 0;
 			if (--irPollCountdown == 0) {
 				/* Fixed 4096-cycle poll (~1.1ms). An adaptive tighter poll
 				 * during RE was tried and regressed the handshake (more I2C
@@ -3229,17 +3231,56 @@ int runNextInstruction(uint64_t* cycleCount){
 				// still pace bytes to the ROM one at a time; only the hardware-FIFO
 				// drain is eager.
 				if (*SCI3.SCR3 & SCI3_RE) {
-					if (SCI3.rxPos >= SCI3.rxLen) {
-						size_t n = ir_recv_poll(SCI3.rxBuf, sizeof(SCI3.rxBuf));
+					/* PRESERVAR LAS FRONTERAS DE PAQUETE (ver bench/README).
+					 * El firmware delimita paquetes por silencios de solo 4
+					 * ticks (~122 us) del contador libre, pero este poll va
+					 * cada 4096 ciclos (~1.1 ms) y solo ve "lo que hay en el
+					 * FIFO". Entregar eso tal cual PARTE cualquier paquete que
+					 * abarque mas de un poll (136 B tardan 11.8 ms en el aire,
+					 * ~11 polls) -> gap falso intra-paquete -> CRC malo ->
+					 * tormenta de bad-CRC -> teardown. Era la causa del muro
+					 * del pairing.
+					 * Solucion: acumular los bytes de polls CONSECUTIVOS y
+					 * entregar el burst COMPLETO y CONTIGUO cuando un poll
+					 * vuelve VACIO (= silencio real en el aire = fin de
+					 * paquete). Coste: ~1.1 ms (un poll) de latencia, frente a
+					 * los ~98 ms de ventana de respuesta del walker. */
+					{
+						uint8_t tmp[256];
+						size_t n = ir_recv_poll(tmp, sizeof(tmp));
 						if (n > 0) {
-							SCI3.rxLen = n;
-							SCI3.rxPos = 0;
-							irTracePush(IR_TRACE_RX_POLL, (uint8_t)n, 0, 0);
-							// Start countdown for first byte delivery (only if
-							// RDR3 is free and no delivery already pending).
-							if (!(*SCI3.SSR3 & SCI3_RDRF) && SCI3.rxCountdown == 0) {
+							/* mismo burst: sigue llegando sin silencio */
+							if (irBurstLen + n > sizeof(irBurst))
+								irBurstLen = 0;          /* desbordado: descartar */
+							memcpy(irBurst + irBurstLen, tmp, n);
+							irBurstLen += n;
+							/* Valvula: un paquete legal nunca pasa de 8+128.
+							 * Si acumulamos mas es que el FIFO traia un BACKLOG
+							 * de varios paquetes (no un paquete partido) ->
+							 * entregar ya, para no fusionarlos. */
+							if (irBurstLen >= 136u &&
+							    SCI3.rxPos >= SCI3.rxLen &&
+							    !(*SCI3.SSR3 & SCI3_RDRF) &&
+							    SCI3.rxCountdown == 0) {
+								size_t m = irBurstLen <= sizeof(SCI3.rxBuf)
+								           ? irBurstLen : sizeof(SCI3.rxBuf);
+								memcpy(SCI3.rxBuf, irBurst, m);
+								SCI3.rxLen = m; SCI3.rxPos = 0; irBurstLen = 0;
 								SCI3.rxCountdown = 320;
 							}
+						} else if (irBurstLen > 0 && ir_rx_air_silent() &&
+						           SCI3.rxPos >= SCI3.rxLen &&
+						           !(*SCI3.SSR3 & SCI3_RDRF) &&
+						           SCI3.rxCountdown == 0) {
+							/* poll vacio + RX libre -> entregar el paquete entero */
+							size_t m = irBurstLen <= sizeof(SCI3.rxBuf)
+							           ? irBurstLen : sizeof(SCI3.rxBuf);
+							memcpy(SCI3.rxBuf, irBurst, m);
+							SCI3.rxLen = m;
+							SCI3.rxPos = 0;
+							irBurstLen = 0;
+							irTracePush(IR_TRACE_RX_POLL, (uint8_t)m, 0, 0);
+							SCI3.rxCountdown = 320;
 						}
 					}
 				}
