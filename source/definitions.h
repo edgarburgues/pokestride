@@ -87,6 +87,7 @@ struct SCI3_t {
 };
 #define SCI3_TE   (1 << 5)  /* Transmit Enable */
 #define SCI3_RE   (1 << 4)  /* Receive Enable */
+#define SCI3_RIE  (1 << 6)  /* Receive Interrupt Enable (SCR3 bit 6) */
 #define SCI3_TDRE (1 << 7)  /* Transmit Data Register Empty */
 #define SCI3_RDRF (1 << 6)  /* Receive Data Register Full */
 #define SCI3_TEND (1 << 2)  /* Transmit End */

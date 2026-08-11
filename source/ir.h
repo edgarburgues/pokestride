@@ -36,6 +36,11 @@ void ir_tx_end(void);
 /* Enable RX FIFO — call when ROM sets RE. */
 void ir_recv_start(void);
 
+/* Discard everything in the SC16IS750 RX FIFO. Call on the RE rising edge
+ * so bytes captured while the ROM's receiver was off (impossible to receive
+ * on real hardware) are not replayed into the ROM as fresh traffic. */
+void ir_rx_flush(void);
+
 /* Non-blocking RX poll: read RXLVL, if >0 read up to maxlen bytes into buf.
  * Returns the number of bytes read (0 if nothing available). */
 size_t ir_recv_poll(uint8_t *buf, size_t maxlen);
@@ -55,3 +60,8 @@ uint64_t ir_get_blocked_ticks(void);
 /* Flush deferred IR event counters to the log file.
  * Must be called from the main loop (safe stack depth for fprintf).     */
 void ir_log_events(void);
+
+/* Diagnostics for the peer-handshake investigation: bytes read from the IR
+ * FIFO this period, how many were stripped as our own echo, and the current
+ * outstanding echo debt. Reading resets the two totals. */
+void ir_get_rx_stats(uint32_t *raw, uint32_t *stripped, uint32_t *owed);

@@ -45,6 +45,9 @@
 /* Blocked-ticks accumulator — read and reset by ir_get_blocked_ticks() */
 static u64 irBlockedTicks = 0;
 
+/* Echo-cancellation debt reset (defined with the streaming TX code below). */
+static void echo_clear(void);
+
 /* Deferred event counters — logged from the main loop, not from the hot path.
  * fprintf inside ir_send/recv (deep call stack) can overflow the 32KB stack. */
 static u32 irTxCount = 0;
@@ -229,6 +232,8 @@ void ir_init(void) {
     I2C_write(REG_FCR, 0x01u);  /* enable FIFO */
     I2C_write(REG_EFCR, 0x00u); /* TX and RX both enabled */
 
+    echo_clear();  /* hardware FIFOs just reset — no echo owed */
+
     LOG("IR: init done, MCR=0x%02x", I2C_read(REG_MCR));
 }
 
@@ -324,9 +329,62 @@ static bool irTxActive = false;
 static bool irRxActive = false;
 static bool irInTxMode = false;  /* true = TX burst in progress */
 
+/* ---- Echo cancellation ---------------------------------------------------
+ * This SC16IS750 loops every transmitted byte back into its own RX FIFO
+ * (measured on hardware: 512 of 522 RX bursts were byte-identical copies of
+ * the preceding TX burst, despite IrDA SIR mode nominally gating its own
+ * pulses). Blindly draining the FIFO after each TX burst suppressed the echo
+ * but also destroyed real peer packets that landed in the same window — in
+ * walker-to-walker negotiation both sides retry on similar cadences, so that
+ * loss deadlocked the handshake.
+ *
+ * Cancellation is by COUNT, not by content. The echo is always exactly the
+ * bytes we transmitted and always arrives before any peer bytes (the chip
+ * loops it back internally the instant we write the FIFO), so we strip the
+ * next `echoOwed` bytes off the front of the RX stream unconditionally.
+ * Content matching was tried first and failed: when a loopback byte gets
+ * bit-flipped or shifted (the IR medium is shared light), the match breaks
+ * mid-echo and the remaining echo bytes leak through as a fake peer packet —
+ * exactly what was seen inflating the ROM's CRC-retry counter to abort. A
+ * counter is immune to that: corrupted or not, our own N bytes are removed.
+ *
+ * `echoOwed` is GLOBAL and is never zeroed mid-connection. The firmware sets
+ * TE once and transmits many retry bursts before it raises RE to listen, so
+ * echo accumulates across a whole TX phase; clearing the counter on the RE
+ * edge (as an earlier version did) discarded that bookkeeping and let the
+ * entire phase's echo leak. Both the drain-on-RE path and the normal poll
+ * decrement the same counter, so however the echo is split between them it is
+ * accounted for exactly once. It only resets at ir_init (hard boot). */
+static u32 echoOwed = 0;
+
+/* Diagnostics: raw bytes read from the FIFO vs bytes stripped as echo.
+ * Read + reset per frame from the main loop for the IR trace log. */
+static u32 irRawRxTotal = 0;
+static u32 irEchoStripTotal = 0;
+
+void ir_get_rx_stats(u32 *raw, u32 *stripped, u32 *owed) {
+    if (raw)      *raw = irRawRxTotal;
+    if (stripped) *stripped = irEchoStripTotal;
+    if (owed)     *owed = echoOwed;
+    irRawRxTotal = 0;
+    irEchoStripTotal = 0;
+}
+
+static void echo_expect(uint8_t b) {
+    (void)b;
+    echoOwed++;
+}
+
+static void echo_clear(void) {
+    echoOwed = 0;
+}
+
 void ir_tx_start(void) {
     irTxActive = true;
     irStreamTxBytes = 0;
+    /* Do NOT clear echoOwed here: a TX phase can span several bursts whose
+     * echo is still queued in the RX FIFO, and the ROM re-arms TX before the
+     * poll has consumed it. The counter is only reset at ir_init. */
     /* No hardware change — irInTxMode set on first byte */
 }
 
@@ -339,6 +397,7 @@ void ir_tx_byte(uint8_t b) {
 
     while (I2C_read(REG_TXLVL) == 0);
     I2C_write(REG_FIFO, b);
+    echo_expect(b);   /* this byte will loop back into the RX FIFO */
 
     irBlockedTicks += svcGetSystemTick() - t0;
     irStreamTxBytes++;
@@ -357,19 +416,22 @@ void ir_tx_byte(uint8_t b) {
 
 /* Called when 320 cycles pass after the last TX byte without a new TDR3
  * write — i.e. the ROM's packet burst is done. Waits for the TX shift
- * register to drain, then drains any echo bytes the chip captured in the RX
- * FIFO during the burst, before ir_recv_poll resumes reading the FIFO. */
+ * register to drain, then re-opens ir_recv_poll.
+ *
+ * The RX FIFO is deliberately NOT drained here. The SC16IS750 in IrDA SIR
+ * mode gates its own pulses out of the RX decoder, so nothing the chip
+ * captured during our burst is self-echo — it can only be real bytes from
+ * the peer. In walker-to-walker negotiation both sides retry on similar
+ * cadences, so the peer's FA/F8 regularly lands exactly in our TX window;
+ * discarding the FIFO here ate those packets and deadlocked the handshake
+ * (both sides resending SYNs until their retry counters aborted the
+ * session). Keeping the bytes lets the poll right after the burst deliver
+ * them to the ROM, which parses them normally. */
 void ir_tx_flush_to_rx(void) {
     if (!irInTxMode) return;
 
     u64 t0 = svcGetSystemTick();
     while (!(I2C_read(REG_LSR) & LSR_TEMT));
-
-    /* Drain own-echo bytes captured during TX (paranoia — IrDA SIR
-     * mode shouldn't echo, but if anything ended up in the RX FIFO
-     * it will not be a valid packet from the peer). */
-    while (I2C_read(REG_RXLVL) > 0)
-        (void)I2C_read(REG_FIFO);
 
     irBlockedTicks += svcGetSystemTick() - t0;
     irInTxMode = false;
@@ -379,8 +441,6 @@ void ir_tx_end(void) {
     u64 t0 = svcGetSystemTick();
     if (irInTxMode) {
         while (!(I2C_read(REG_LSR) & LSR_TEMT));
-        while (I2C_read(REG_RXLVL) > 0)
-            (void)I2C_read(REG_FIFO);
         irInTxMode = false;
     }
     irBlockedTicks += svcGetSystemTick() - t0;
@@ -398,6 +458,36 @@ void ir_recv_start(void) {
     irRxActive = true;
 }
 
+/* Discard everything sitting in the SC16IS750 RX FIFO. Called on the
+ * SCR3 RE rising edge: while the ROM's receiver is off, a real walker
+ * physically cannot receive, but our chip keeps capturing — so whatever
+ * accumulated (typically seconds of the peer's FC beacons between
+ * connection attempts) was never "seen" by real hardware and must not be
+ * replayed into the ROM when it re-arms RX. Feeding that backlog made the
+ * ROM answer beacons the peer sent seconds earlier and desynced the
+ * handshake from the first byte. */
+void ir_rx_flush(void) {
+    uint8_t scratch[64];
+    u64 t0 = svcGetSystemTick();
+    /* Bounded: the FIFO is 64 bytes, so 4 rounds (256 B) covers any real
+     * backlog plus bytes trickling in mid-flush. A wedged chip that reports
+     * a nonzero RXLVL forever must not hang the emulator inside a guest
+     * register write. */
+    for (int round = 0; round < 4; round++) {
+        uint8_t lvl = I2C_read(REG_RXLVL);
+        if (lvl == 0) break;
+        if (lvl > sizeof(scratch)) lvl = sizeof(scratch);
+        I2C_read_array(REG_FIFO, scratch, lvl);
+        /* Drained bytes are echo first (transmitted before RE rose), then
+         * stale peer beacons. Credit them against the echo debt so the poll
+         * doesn't strip real peer bytes later; the remainder are beacons we
+         * intend to discard anyway. */
+        u32 credit = lvl < echoOwed ? lvl : echoOwed;
+        echoOwed -= credit;
+    }
+    irBlockedTicks += svcGetSystemTick() - t0;
+}
+
 size_t ir_recv_poll(uint8_t *buf, size_t maxlen) {
     if (irInTxMode) return 0;  /* gate during TX burst — see header comment */
 
@@ -405,17 +495,27 @@ size_t ir_recv_poll(uint8_t *buf, size_t maxlen) {
     if (rxlvl == 0) return 0;
     if (rxlvl > maxlen) rxlvl = (uint8_t)maxlen;
     I2C_read_array(REG_FIFO, buf, rxlvl);
+    irRawRxTotal += rxlvl;
+
+    /* Strip our own echo by count (see echo_expect): drop the leading
+     * echoOwed bytes, they are our transmitted burst looping back. */
+    size_t kept = 0;
+    for (size_t i = 0; i < rxlvl; i++) {
+        if (echoOwed > 0) { echoOwed--; irEchoStripTotal++; continue; }
+        buf[kept++] = buf[i];
+    }
+    if (kept == 0) return 0;
 
     irRxCount++;
-    irRxBytes += rxlvl;
-    irRxHeadLen = rxlvl < 8 ? rxlvl : 8;
+    irRxBytes += kept;
+    irRxHeadLen = kept < 8 ? kept : 8;
     memcpy(irRxHead, buf, irRxHeadLen);
-    if (irRxDumpLen + rxlvl <= sizeof(irRxDump)) {
-        memcpy(irRxDump + irRxDumpLen, buf, rxlvl);
-        irRxDumpLen += rxlvl;
+    if (irRxDumpLen + kept <= sizeof(irRxDump)) {
+        memcpy(irRxDump + irRxDumpLen, buf, kept);
+        irRxDumpLen += kept;
     }
 
-    return (size_t)rxlvl;
+    return kept;
 }
 
 void ir_recv_stop(void) {

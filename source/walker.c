@@ -275,9 +275,13 @@ void setMemory8(uint32_t address, uint8_t value){
 			irTracePush(IR_TRACE_TE_OFF, 0, pc, 0);
 			ir_tx_end();
 		}
-		// RE rising edge → start RX
+		// RE rising edge → start RX. Flush the hardware FIFO first: bytes
+		// captured while RE was off (stale peer beacons piling up between
+		// connection attempts) were never receivable on real hardware and
+		// must not be replayed into the ROM as fresh traffic.
 		if (!(prev & SCI3_RE) && (value & SCI3_RE)) {
 			irTracePush(IR_TRACE_RE_ON, 0, pc, 0);
+			ir_rx_flush();
 			ir_recv_start();
 			SCI3.rxLen = 0;
 			SCI3.rxPos = 0;
@@ -3211,6 +3215,10 @@ int runNextInstruction(uint64_t* cycleCount){
 		{
 			static uint32_t irPollCountdown = 4096;
 			if (--irPollCountdown == 0) {
+				/* Fixed 4096-cycle poll (~1.1ms). An adaptive tighter poll
+				 * during RE was tried and regressed the handshake (more I2C
+				 * per frame added jitter exactly when timing matters); the
+				 * cleanest handshake runs used this fixed rate, so keep it. */
 				irPollCountdown = 4096;
 				// Drain the SC16IS750 RX FIFO as soon as the previous burst has
 				// been fully delivered to the ROM (rxPos >= rxLen), NOT gated on

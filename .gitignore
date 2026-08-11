@@ -12,6 +12,8 @@ build/
 *.bin
 *.3dsx
 *.elf
+*.smdh
+*.map
 
 # ROM dumps — must not be distributed
 *.rom

@@ -17,8 +17,8 @@ include $(DEVKITARM)/3ds_rules
 #---------------------------------------------------------------------------------
 TARGET   := pokeStride
 BUILD    := build
-SOURCES  := src source
-INCLUDES := src source
+SOURCES  := source
+INCLUDES := source
 
 APP_TITLE       := PokeStride
 APP_DESCRIPTION := PokeWalker emulator

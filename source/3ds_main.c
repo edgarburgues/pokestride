@@ -149,7 +149,10 @@ int main(int argc, char *argv[])
     chdir("sdmc:/3ds/pokeStride");
 
     logOpen();
-    jsonlog_init(NULL); /* file logging disabled */
+    /* DEBUG BUILD: capture the IR exchange for pairing diagnosis.
+     * Writes sdmc:/3ds/pokeStride/ir_events.jsonl (block-buffered, flushed
+     * per frame — see jsonlog.c for why this doesn't break IR timing). */
+    jsonlog_init("ir_events.jsonl");
     LOG("=== PokeStride started ===");
     LOG("SYSTICK_HZ=%llu  H8_HZ=%llu  TICKS_PER_CYCLE_INT=%llu  REM=%llu",
         SYSTICK_HZ, H8_HZ, TICKS_PER_CYCLE_INT, TICKS_PER_CYCLE_REM);
@@ -480,6 +483,19 @@ int main(int argc, char *argv[])
                            "\"old\":\"0x%04X\",\"new\":\"0x%04X\"",
                            lastEvtLoop, evtLoop);
                 lastEvtLoop = evtLoop;
+            }
+
+            /* Echo/RX diagnostics: raw bytes off the FIFO, how many were
+             * stripped as our own echo, and the outstanding echo debt. This
+             * answers whether the master's post-SYN-ACK stream (10-02) is
+             * arriving at all and whether echo cancellation is eating it. */
+            u32 rawrx = 0, stripped = 0, owed = 0;
+            ir_get_rx_stats(&rawrx, &stripped, &owed);
+            if (rawrx || stripped || owed) {
+                jsonlog_ev("ir_rx_stats",
+                           "\"raw\":%lu,\"stripped\":%lu,\"owed\":%lu",
+                           (unsigned long)rawrx, (unsigned long)stripped,
+                           (unsigned long)owed);
             }
         }
         irTraceFlush();
