@@ -325,6 +325,9 @@ void ir_send(const uint8_t *buf, size_t len) {
  */
 
 static u32 irStreamTxBytes = 0;
+/* Paquete que la ROM esta produciendo; se emite entero en ir_tx_drain(). */
+static uint8_t txPkt[288];
+static size_t  txPktLen = 0;
 static bool irTxActive = false;
 static bool irRxActive = false;
 static bool irInTxMode = false;  /* true = TX burst in progress */
@@ -392,24 +395,69 @@ static void echo_clear(void) {
 void ir_tx_start(void) {
     irTxActive = true;
     irStreamTxBytes = 0;
+    txPktLen = 0;
     /* Do NOT clear echoOwed here: a TX phase can span several bursts whose
      * echo is still queued in the RX FIFO, and the ROM re-arms TX before the
      * poll has consumed it. The counter is only reset at ir_init. */
     /* No hardware change — irInTxMode set on first byte */
 }
 
+/* ---- Paquete en curso ----------------------------------------------------
+ *
+ * La ROM entrega los bytes de uno en uno (walker.c llama a ir_tx_byte cada vez
+ * que expira txCountdown). La version anterior los mandaba al chip tambien de
+ * uno en uno, con DOS transacciones I2C por byte: leer TXLVL en espera activa y
+ * escribir el FIFO. A 100-160 us por transaccion eso son ~269 us por byte
+ * — medido en el aire con timestamps reales: un paquete de 136 B tardaba
+ * 36.6 ms en salir cuando a 115200 baudios ocupa 11.8 ms. Tres veces mas lento
+ * que la linea, o sea ~182 us de silencio entre byte y byte.
+ *
+ * El Pokewalker real cierra paquete con solo 122 us de silencio: veia CADA BYTE
+ * como un paquete distinto, fallaba el CRC de todos, y su contador acumulativo
+ * llegaba a 20 y cortaba la sesion. Esa es la tormenta de bad-CRC contra la que
+ * se estrello el pairing durante meses. Nuestro peer del PC no lo detectaba
+ * porque enmarca con 12 ms de tolerancia.
+ *
+ * Ahora el paquete se acumula aqui y sale de una pieza en ir_tx_drain(), con
+ * I2C_write_array como ya hacian ir_send() e ir_cmd2(). El ritmo del cable lo
+ * marca el UART, que es lo unico capaz de sostener 115200 sin huecos. */
+static void ir_tx_drain(void) {
+    if (txPktLen == 0) return;
+
+    const uint8_t *ptr = txPkt;
+    size_t len = txPktLen;
+    txPktLen = 0;
+
+    u64 t0 = svcGetSystemTick();
+    u64 deadline = t0 + IR_SEND_DEADLINE_TICKS;
+
+    while (len) {
+        if (svcGetSystemTick() >= deadline) break;   /* chip colgado: no girar */
+        uint8_t txlvl = I2C_read(REG_TXLVL);
+        size_t  sent  = len > txlvl ? txlvl : len;
+        if (sent > 0) {
+            I2C_write_array(REG_FIFO, ptr, (u32)sent);
+            ptr += sent;
+            len -= sent;
+        }
+        /* El eco de lo ya emitido entra mientras seguimos aqui, y el FIFO de RX
+         * son 64 B frente a los 136 del paquete. Vaciarlo en cada vuelta evita
+         * que desborde y se lleve por delante lo que el peer mande despues. */
+        ir_drain_tx_echo();
+    }
+
+    irBlockedTicks += svcGetSystemTick() - t0;
+}
+
 void ir_tx_byte(uint8_t b) {
     irTracePush(IR_TRACE_TX_BYTE, b, 0, 0);
 
-    u64 t0 = svcGetSystemTick();
-
     irInTxMode = true; /* gate ir_recv_poll until burst ends */
 
-    while (I2C_read(REG_TXLVL) == 0);
-    I2C_write(REG_FIFO, b);
+    if (txPktLen >= sizeof txPkt) ir_tx_drain();  /* rafaga anormal: soltar ya */
+    txPkt[txPktLen++] = b;
     echo_expect(b);   /* this byte will loop back into the RX FIFO */
 
-    irBlockedTicks += svcGetSystemTick() - t0;
     irStreamTxBytes++;
 
     /* Deferred logging */
@@ -440,6 +488,11 @@ void ir_tx_byte(uint8_t b) {
 void ir_tx_flush_to_rx(void) {
     if (!irInTxMode) return;
 
+    /* Aqui es donde el paquete sale de verdad: la ROM ha dejado de escribir
+     * TDR3 durante 320 ciclos, o sea que ya lo tiene entero. Se emite de una
+     * pieza para que en el aire no haya huecos entre bytes (ver ir_tx_drain). */
+    ir_tx_drain();
+
     u64 t0 = svcGetSystemTick();
     while (!(I2C_read(REG_LSR) & LSR_TEMT));
 
@@ -456,6 +509,7 @@ bool ir_tx_busy(void) { return irInTxMode; }
 void ir_tx_end(void) {
     u64 t0 = svcGetSystemTick();
     if (irInTxMode) {
+        ir_tx_drain();          /* que no se quede nada sin emitir */
         while (!(I2C_read(REG_LSR) & LSR_TEMT));
         irInTxMode = false;
     }
