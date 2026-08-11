@@ -46,6 +46,16 @@ void jsonlog_close(void);
 void jsonlog_ev(const char *kind, const char *extra_fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
+/* Igual, pero con el tick del evento en vez del de ahora. Lo usa irtrace.c al
+ * volcar el ring: los eventos se guardaron en crudo con SU instante, así que
+ * el timestamp es el real y no el del volcado. */
+void jsonlog_ev_at(uint64_t tick, const char *kind, const char *extra_fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+
+/* Cambia a escritura directa al fichero (vuelca antes lo pendiente). Solo al
+ * salir: a partir de ahí formatear puede congelar sin consecuencias. */
+void jsonlog_set_direct(void);
+
 /* Hex-byte helper (for ir_tx / ir_rx).  Writes a "bytes":[...] array. */
 void jsonlog_ev_bytes(const char *kind, const uint8_t *buf, uint32_t len,
                       uint16_t pc);

@@ -312,12 +312,32 @@ int main(int argc, char *argv[])
          * dos tramas rotas. Un walker real es aún menos tolerante: enmarca
          * con 122 us de silencio.
          *
+         * Tampoco se renderiza si el frame anterior tuvo actividad IR, porque
+         * entonces puede estar llegando una respuesta del peer. Ese es el otro
+         * lado del mismo problema y mata por RX en vez de por TX: el FIFO del
+         * SC16IS750 son 64 B y una respuesta 0x0E son 136 B, así que basta con
+         * dejar de vaciarlo 5.5 ms para perder bytes. Medido en el aire: la
+         * petición de lectura #5 salió al final de un frame, el peer contestó
+         * durante la congelación, y de los 136 B de respuesta entraron
+         * exactamente 64 — el FIFO lleno — con los otros 72 perdidos.
+         *
          * Saltarse el frame es barato: el LCD del walker va a 4 FPS y una
-         * sesión de emparejamiento dura segundos. El tope de 8 frames evita
-         * que la UI se congele si irInTxMode se quedara colgado. */
+         * sesión de emparejamiento entera dura ~1 s (4-5 frames). El tope de
+         * 20 frames acota la UI congelada a 5 s por si la ROM se queda
+         * beaconeando en Conectar, y evita un bloqueo permanente si
+         * irInTxMode se colgara. */
         static uint32_t skippedRenders = 0;
-        bool skipRender = ir_tx_busy() && skippedRenders < 8;
-        skippedRenders = skipRender ? skippedRenders + 1 : 0;
+        static uint32_t prevTraceHead  = 0;
+        uint32_t traceHeadNow = irTraceHead();
+        uint32_t irEventsThisFrame = traceHeadNow - prevTraceHead;  /* solo este frame */
+        prevTraceHead = traceHeadNow;
+
+        /* Menos de ~64 eventos = beaconeo suelto, cuyos paquetes son de 8 B y
+         * caben de sobra en el FIFO; ahí renderizar es inofensivo. A partir de
+         * ahí hay transferencia de verdad y cualquier parón cuesta bytes. */
+        bool inSession  = ir_tx_busy() || irEventsThisFrame >= 64;
+        bool skipRender = inSession && skippedRenders < 240;
+        skippedRenders  = skipRender ? skippedRenders + 1 : 0;
 
         u64 renderStart = svcGetSystemTick();
 
@@ -517,7 +537,17 @@ int main(int argc, char *argv[])
                            (unsigned long)owed);
             }
         }
-        uint32_t irEventsThisFrame = irTraceFlush();
+        /* Aquí NO se formatea ni se escribe nada. Las trazas IR se quedan en
+         * crudo en el ring y se vuelcan enteras al salir (ver irtrace.h): un
+         * frame de la fase de lectura son ~800 eventos y formatearlos cuesta
+         * ~7 ms, tiempo de sobra para que el FIFO de 64 B del SC16IS750 se
+         * desborde con una respuesta de 136 B. Medido en el aire: llegaron 113
+         * de 136. Los eventos sueltos (sesión, rol, error, stats) sí se emiten
+         * al vuelo, pero son uno o dos por frame y van a un buffer de RAM. */
+        if (!inSession) {
+            if (logFile) fflush(logFile);
+            jsonlog_flush();
+        }
 
         /* Bajar el log a la SD SOLO en frames sin actividad IR.
          *
@@ -669,6 +699,16 @@ int main(int argc, char *argv[])
     }
     jsonlog_ev("end", "\"frame\":%lu,\"cycles\":%llu",
                (unsigned long)frameNumber, (unsigned long long)totalCycles);
+
+    /* Volcado de las trazas IR: se acumularon en crudo durante todo el run
+     * precisamente para no formatear nada mientras el enlace estaba vivo.
+     * Aquí ya no hay sesión que romper, así que se formatea todo de golpe y
+     * directo al fichero (~8 us por evento; un run de 40 s son ~0.1 s). */
+    jsonlog_set_direct();
+    {
+        uint32_t n = irTraceFlush();
+        LOG("IR trace: %lu eventos volcados", (unsigned long)n);
+    }
     jsonlog_close();
     logClose();
 
