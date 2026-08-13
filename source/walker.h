@@ -15,7 +15,7 @@
 
 /* PC of ui_keypoll_main for the ROM with entry==0x0080. Set from the ELF symbol
  * table so the button-inject hook survives firmware rebuilds. 0 = disabled. */
-extern uint32_t walkerV2KeypollPC;
+extern uint32_t walkerAltKeypollPC;
 
 void initWalker(); // Must be called once before the main loop
 int runNextInstruction(uint64_t* cycleCount); // Must be called once every main loop iteration and given a cycleCount variable defined globally

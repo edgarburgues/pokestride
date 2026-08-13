@@ -91,7 +91,7 @@ static int entry;  /* ROM entry point — read from reset vector */
 /* PC of ui_keypoll_main for an alternate firmware build (entry==0x0080),
  * resolved from the ELF symbol table at startup so the button-inject hook
  * survives rebuilds that move the function. 0 = unresolved/disabled. */
-uint32_t walkerV2KeypollPC = 0;
+uint32_t walkerAltKeypollPC = 0;
 
 /* H8/300H Tiny flag-clear protocol ("read-1-then-write-0"): writing 0 to a
  * status flag clears it only if the last read of the register returned that
@@ -646,9 +646,9 @@ int runNextInstruction(uint64_t* cycleCount){
 			// own output bits on the same port.
 			//
 			// ui_keypoll_main's PC varies between builds, so it is resolved from
-			// the ELF symbol table into walkerV2KeypollPC at startup.
+			// the ELF symbol table into walkerAltKeypollPC at startup.
 			// 0 = unresolved.
-			if (walkerV2KeypollPC && pc == walkerV2KeypollPC) {
+			if (walkerAltKeypollPC && pc == walkerAltKeypollPC) {
 				if (!isEmpty(&inputQueue)) {
 					uint8_t key = popElement(&inputQueue);
 					setMemory8(0xffde, (memory[0xffde] & 0xEA) | (key & 0x15));
@@ -2906,7 +2906,7 @@ int runNextInstruction(uint64_t* cycleCount){
 										case 0x5:{ // RDSR - read status register
 											eeprom.buffer.state = EEPROM_GETTING_STATUS_REGISTER;
 										} break;
-										case 0x6:{ // WREN - write enable. v2 drives EEP writes
+										case 0x6:{ // WREN - write enable. Some images drive EEP writes
 										            // full-duplex (SSER=0xC0), so WREN/WRITE land
 										            // on this read path; honour them here too.
 											eeprom.status |= 0x2; // WEL
