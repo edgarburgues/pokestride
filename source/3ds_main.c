@@ -149,12 +149,20 @@ int main(int argc, char *argv[])
     chdir("sdmc:/3ds/pokeStride");
 
     logOpen();
-    /* DEBUG BUILD: captura el intercambio IR para diagnosticar el pairing.
-     * Escribe sdmc:/3ds/pokeStride/ir_events.jsonl, truncándolo en cada
-     * arranque (fopen "w") para que el log sea siempre el del run actual.
-     * Los eventos se acumulan en RAM y solo bajan a SD en frames sin IR;
-     * ver jsonlog.c para por qué escribir durante la sesión la rompía. */
-    jsonlog_init("ir_events.jsonl");
+    /* Traza del intercambio IR, para diagnosticar problemas de emparejamiento.
+     *
+     * Apagada salvo que exista sdmc:/3ds/pokeStride/ir_debug: reserva 4 MiB y
+     * escribe ir_events.jsonl en la tarjeta, y eso no debe pasarle a quien solo
+     * quiere usar el programa. Con el fichero presente se activa, se trunca en
+     * cada arranque y solo baja a la SD al salir; ver jsonlog.c para por qué
+     * escribir durante una sesión la rompía. */
+    {
+        FILE *marker = fopen("ir_debug", "rb");
+        if (marker) {
+            fclose(marker);
+            jsonlog_init("ir_events.jsonl");
+        }
+    }
     LOG("=== PokeStride started ===");
     LOG("SYSTICK_HZ=%llu  H8_HZ=%llu  TICKS_PER_CYCLE_INT=%llu  REM=%llu",
         SYSTICK_HZ, H8_HZ, TICKS_PER_CYCLE_INT, TICKS_PER_CYCLE_REM);

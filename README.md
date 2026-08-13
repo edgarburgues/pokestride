@@ -40,10 +40,43 @@ They belong to Nintendo and are **not** included here.
 | ✅ | CPU, screen, buttons, and save (auto-saved to `pweep.rom`) |
 | ✅ | IR: the physical link and exchanging commands with a real PokéWalker (CONNECT) |
 | ✅ | Step counting while the 3DS lid is closed |
-| ⚠️ | **Pairing with a real PokéWalker is partial** — the full handshake completes in testing with [pwdbg](https://github.com/edgarburgues/pwdbg), but not yet against real hardware |
+| ✅ | **Peer play against [pwlink](https://git.diogenes-homelab.com/akadmin/pwlink)** — the complete encounter, first try: identity, 11 EEPROM writes, 11 reads, play-data and completion, in about 1.5 seconds. See [Pairing with pwlink](#pairing-with-pwlink) |
+| ⚠️ | **A direct encounter with a real PokéWalker is close, but not there yet.** Both halves of the link are already proven separately: pwlink completes encounters with a real PokéWalker, and pwlink completes them with PokeStride. Put PokeStride and a real walker face to face and they do see each other — traffic flows both ways and roles are negotiated — but the session tears down before finishing. So the remaining work is optimisation and noise, not anything unknown: the receive path still hands bytes to the firmware at a fixed cadence, erasing the inter-packet silence the protocol uses to delimit frames |
 | ⚠️ | **Audio is off for now** — the sound code is incomplete; planned for a later update |
 | ⚠️ | **Steps only count with the lid closed** — they come from the console's own step counter, not the walker's motion sensor, so the lid has to be shut. This is a limitation on our side, not how the real walker behaves |
 | ⚠️ | A few internal self-checks (watchdog / ADC / some clock counters) are skipped — not needed to run the firmware |
+
+## Pairing with pwlink
+
+**[pwlink](https://git.diogenes-homelab.com/akadmin/pwlink)** is a PC-side implementation of
+the PokéWalker's infrared protocol. It acts as a second walker, so you can put PokeStride
+through a complete encounter without needing two devices — and, because it logs both ends,
+it is how the IR path in PokeStride was debugged in the first place.
+
+You need an IrDA SIR transceiver on a serial port. The setup used here is a Flipper Zero in
+USB-UART bridge mode with an MY018 module on its GPIO header; anything that gives you
+115200-baud SIR will do.
+
+```bash
+python pwlink.py encounter --port COM3 --image eeprom.bin
+```
+
+Put PokeStride on its CONNECT screen, point it at the transceiver, and the encounter runs:
+identity, eleven EEPROM writes, eleven reads, the play-data exchange and completion. pwlink
+then prints what the other side revealed — trainer identifier, steps, watts, and the walking
+Pokémon's sprite and name drawn from the bitmaps it sent.
+
+Two things matter for this to work, and both cost hours to find:
+
+- **Unplug the console's charger.** A switching supply couples enough noise into the
+  receiver's front end to swamp the link; it showed up as a continuous stream of
+  alternating-bit bytes and stopped the handshake dead.
+- **Don't beacon without pause.** Anything you transmit resets the peer's silence timer, so
+  a continuous beacon stops it ever timing out and re-announcing. pwlink goes quiet for
+  300 ms every 1.2 s for exactly this reason.
+
+The protocol itself, the timing constraints behind both of those, and a reference
+implementation are documented in pwlink's specification.
 
 ## Adding more games
 
@@ -65,9 +98,14 @@ Or `make` with a native devkitPro install. Output: `pokeStride.3dsx`.
 
 ## Learn more
 
-The **[wiki](https://github.com/edgarburgues/pokestride/wiki)** covers the architecture,
-how the emulation works (CPU, LCD, EEPROM, IR), the CONNECT/pairing status, and the
-bundled PokéWalker/3DS hardware reference docs.
+The **[wiki](https://git.diogenes-homelab.com/akadmin/pokestride/wiki)** covers the infrared
+path in depth — the three protocol constants that decide whether an implementation
+interoperates, the five root causes that had to be fixed to reach a complete encounter, and
+how to capture and read a byte-level trace from both ends of the link.
+
+The bundled reference documents cover the rest: `pokewalker_hardware.md` for the device,
+`pokewalker_rom_map.md` for the EEPROM layout, and `3ds_hardware.md` for how the console's
+IR transceiver is reached.
 
 ## Credits & license
 
